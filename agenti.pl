@@ -195,10 +195,10 @@ sub llm_response {
     my $i = 0;
     for my $msg (@$messages) {
         my $var = 'c' . $i++;
-        push @jq_args, '--arg', $var, $msg->{content};
+        push @jq_args, '--arg', $var, san($msg->{content});
         push @jq_msgs, '{role:"' . $msg->{role} . '",content:$' . $var . '}';
     }
-    push @jq_args, '--arg', 'p', $prompt;
+    push @jq_args, '--arg', 'p', san($prompt);
     push @jq_msgs, '{role:"user",content:$p}';
 
     my $jq_program = '{model:"xiaomi/mimo-v2.6-flash",'
@@ -244,4 +244,17 @@ sub sh_quote {
     my ($str) = @_;
     $str =~ s/'/'\\''/g;
     return "'$str'";
+}
+
+## Strip NUL bytes before a string becomes part of a shell command ##
+## Command output with binary data (e.g. head -c on an executable) ##
+## ends up in $history and then inside the prompt: execve() takes   ##
+## NUL-terminated strings, so a single NUL would silently truncate  ##
+## the jq command line and leave the shell with a broken,           ##
+## half-quoted program (Syntax error: Unterminated quoted string).  ##
+sub san {
+    my ($str) = @_;
+    return '' unless defined $str;
+    $str =~ s/\0//g;
+    return $str;
 }

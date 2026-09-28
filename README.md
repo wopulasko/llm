@@ -24,6 +24,10 @@ The agents ask the LLM for exactly one of `COMMAND: <shell command>` or
 `DONE: <explanation>`, and nothing runs until you answer `y` to the
 `Execute? [y/N]` prompt.
 
+Binary output is tolerated: `agenti.pl` strips NUL bytes from the
+conversation before they are embedded in the `jq`/`curl` request, so
+commands that print raw bytes cannot break the request pipeline.
+
 ## Quick start
 
 ```sh

@@ -147,6 +147,15 @@ adds real conversation memory and polish.
   shell arguments are single-quote escaped by `sh_quote`. Command exit
   statuses are computed the way `sh` reports them (exit code, or
   `128+signal` when killed by a signal, `127` if exec failed).
+* **NUL handling**: NUL bytes are stripped (`san`) from the current
+  prompt and from every replayed message before they join the
+  `jq -n --arg …` command line. `execve()` arguments are
+  NUL-terminated, so a NUL byte (typically from binary command output
+  stored in `$history`) would otherwise silently truncate the command
+  mid-quote, leave the shell with a broken `jq` program
+  (`Syntax error: Unterminated quoted string`) and turn every further
+  request into a `null` response. Invalid UTF-8 needs no special
+  treatment: `jq` maps it to U+FFFD itself.
 
 ## Typical session
 
