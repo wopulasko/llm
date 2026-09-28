@@ -20,9 +20,13 @@ prompt tools and three human-in-the-loop shell agents.
 | `agenti.sh`  | shell | Interactive agent REPL; each task is handled independently (no memory between tasks). |
 | `agenti.pl`  | Perl  | Interactive agent REPL with full conversation context (`--no-context` to disable), colours and `--help`. |
 
-The agents ask the LLM for exactly one of `COMMAND: <shell command>` or
-`DONE: <explanation>`, and nothing runs until you answer `y` to the
-`Execute? [y/N]` prompt.
+The shell agents (`agent.sh`, `agenti.sh`) ask the LLM for exactly one
+of `COMMAND: <shell command>` or `DONE: <explanation>`, and nothing runs
+until you answer `y` to the `Execute? [y/N]` prompt.  `agenti.pl` adds a
+third reply type, `RESPONSE: <text>`: it decides on its own whether a
+message needs a shell command or is just conversation, so ordinary chat
+is answered with plain text and never triggers an unprovoked Bash
+invocation.
 
 Binary output is tolerated: `agenti.pl` strips NUL bytes from the
 conversation before they are embedded in the `jq`/`curl` request, so

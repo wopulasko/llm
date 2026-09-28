@@ -132,8 +132,22 @@ adds real conversation memory and polish.
 * **Command line**: `--no-context` and `-h/--help` (usage text describing
   options, environment and exit status); unknown options exit with
   status 2.
-* **Same `COMMAND:`/`DONE:` protocol** and y/N confirmation as the shell
-  agents; per-task execution history (`$history`) still feeds the prompt.
+* **Three-way reply protocol**: unlike the shell agents, the prompt
+  offers the LLM one of
+
+  ```
+  COMMAND: <one shell command>
+  RESPONSE: <plain-text reply to the user>
+  DONE: <short explanation>
+  ```
+
+  and the script acts accordingly.  `COMMAND:` proposals go through the
+  usual y/N confirmation and are run with `sh -c … 2>&1`; per-task
+  execution history (`$history`) still feeds the next prompt.
+  `RESPONSE:` is printed as a conversational answer with no shell
+  involvement, so ordinary chatting never triggers a Bash invocation.
+  `DONE:` reports a completed task.  Anything else is printed as
+  `Unexpected LLM response` on stderr.
 * **Colours**: subdued ANSI colours distinguish the parts of the output —
   green (user query/prompt), yellow (command + confirmation), cyan
   (program output), magenta (LLM answer).

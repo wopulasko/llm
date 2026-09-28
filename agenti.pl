@@ -32,7 +32,8 @@ if ($want_help) {
 Usage: agenti.pl [--no-context] [--help]
 
 Interactive shell agent. Type a task, confirm the shell commands it
-proposes and it will execute them for you.
+proposes and it will execute them for you.  Ordinary conversation is
+answered directly, with no shell command involved.
 
 By default the agent holds the context of the conversation: every new
 task can build on everything that was asked, executed and answered
@@ -104,7 +105,14 @@ $history
 
 Return EXACTLY ONE of:
 COMMAND: <one shell command>
+RESPONSE: <plain-text reply to the user>
 DONE: <short explanation>
+
+Use COMMAND only when a shell command must be run to accomplish the
+task.  Use RESPONSE for ordinary conversation: greetings, questions,
+small talk and any message that needs no shell - answer with text
+alone and never invoke a shell just to reply.  Use DONE when the
+executed commands have completed the task; add a short explanation.
 
 Do not use markdown fences.
 PROMPT
@@ -149,6 +157,15 @@ PROMPT
                 print_block($CYAN . 'Task aborted.' . $RESET . "\n");
                 last;
             }
+        }
+        elsif ($response =~ /^RESPONSE: /) {
+            my $msg = substr($response, length('RESPONSE: '));
+            print_block($MAGENTA . $msg . $RESET . "\n");
+            # A chat answer ends this turn just like DONE, but nothing
+            # was executed, so the execution history stays untouched.
+            print "\n";
+            $after_blank = 1;
+            last;
         }
         elsif ($response =~ /^DONE: /) {
             my $msg = substr($response, length('DONE: '));
