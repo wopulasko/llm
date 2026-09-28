@@ -129,6 +129,30 @@ adds real conversation memory and polish.
   new request, so later tasks can build on everything asked, executed
   and answered before. With `--no-context` the list stays empty and each
   request carries only the current task (the amnesiac/old behaviour).
+* **Slash commands**: two inputs at the `agent>` prompt are handled
+  locally and never sent to the LLM as a task of their own:
+
+  ```
+  /codebase [pattern ...]  Read the matching files into the
+                           conversation context.  Patterns are
+                           shell-like wildcards (* and ?), looked up
+                           recursively among the files below the
+                           current directory; several patterns may be
+                           combined ("*py *md*"), the default is "*".
+  /prune                   Forget the conversation so far and return
+                           to the agent's system prompt, as if the
+                           conversation were starting fresh.
+  ```
+
+  `/codebase` appends one user message holding a `=== path ===` dump
+  of every match (deduplicated across patterns; `.git` bookkeeping
+  and symlinks are skipped, plain paths without wildcards are read as
+  given) and reports the files it added on screen; a pattern that
+  matches nothing only prints a warning.  `/prune` empties
+  `@messages`, so the next request carries the system prompt and the
+  new task alone.  Both commands work under `--no-context` too: an
+  explicit `/codebase` load is kept until it is pruned, while the
+  ordinary turns stay context-free as usual.
 * **Command line**: `--no-context` and `-h/--help` (usage text describing
   options, environment and exit status); unknown options exit with
   status 2.

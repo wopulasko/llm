@@ -44,6 +44,19 @@ Options:
                      independently, as if it were the first one.
   -h, --help         Display this help and exit.
 
+Commands (typed at the agent> prompt, handled locally):
+  /codebase [pattern ...]  Read the matching files into the
+                           conversation context.  Patterns are
+                           shell-like wildcards (* and ?) looked up
+                           among the files below the current
+                           directory (recursively); several patterns
+                           may be combined ("*py *md*"), the default
+                           is "*".  Files that match more than one
+                           pattern are read only once.
+  /prune                   Forget the conversation so far and
+                           return to the agent's system prompt, as
+                           if the conversation were starting fresh.
+
 Environment:
   API_BASE  Base URL of the chat-completions API.
   VIBE_KEY  Bearer token for the API.
@@ -90,6 +103,30 @@ while (1) {
         exit 0;
     }
     next if $task eq '';
+
+    # Local slash commands: they reshape the conversation context on
+    # the spot and are never sent to the LLM as a task of their own.
+    if ($task =~ m{\A/codebase(?:\s+(.*))?\z}s) {
+        # Copy $1 out immediately: any later match would reset it.
+        my $patterns = $1 // '';
+        $patterns =~ s/\A\s+//;
+        $patterns =~ s/\s+\z//;
+        $patterns = '*' unless length $patterns;
+        codebase_load($patterns);
+        next;
+    }
+
+    if ($task =~ m{\A/prune\s*\z}s) {
+        # Drop everything the conversation accumulated: the next
+        # request starts from the agent's system prompt alone, just
+        # as if this were the first message ever asked.
+        @messages = ();
+        print_block($CYAN . 'Context pruned: back to the system prompt,'
+            . ' as in a fresh conversation.' . $RESET . "\n");
+        print "\n";
+        $after_blank = 1;
+        next;
+    }
 
     my $history = '';
 
@@ -187,6 +224,114 @@ PROMPT
             last;
         }
     }
+}
+
+## Read the files matching the /codebase patterns into the context  ##
+## (@messages).  Patterns are shell-like wildcards: "*" and "?" are   ##
+## recognised, every other character stands for itself; a plain path  ##
+## (no wildcard) is read as given, absolute or not.  Wildcards are    ##
+## matched against every regular file below the current directory     ##
+## (recursively), against the path as well as against the bare file   ##
+## name, so "*py", "*md*" and just "*" all work as expected.          ##
+sub codebase_load {
+    my ($patterns) = @_;
+
+    my @pat = grep { length } split ' ', $patterns;
+    @pat = ('*') unless @pat;
+
+    my @tree = list_files('.');
+    my (@found, %seen);
+    for my $pat (@pat) {
+        if ($pat !~ /[*?]/ && -f $pat) {    # an explicit path: keep it
+            push @found, $pat unless $seen{$pat}++;
+            next;
+        }
+        my $re = pattern_to_regex($pat);
+        for my $file (@tree) {
+            my $base = $file;
+            $base =~ s{.*/}{};
+            if ($file =~ $re || $base =~ $re) {
+                push @found, $file unless $seen{$file}++;
+            }
+        }
+    }
+    @found = sort @found;
+
+    my $dump = 'The following files are now part of the conversation'
+             . ' context (loaded with /codebase):';
+    my @listed;
+    for my $file (@found) {
+        my $content = slurp($file);
+        if (!defined $content) {
+            print STDERR "agenti.pl: cannot read $file: $!\n";
+            next;
+        }
+        $dump .= "\n\n=== $file ===\n" . $content;
+        push @listed, sprintf('%s (%d bytes)', $file, length $content);
+    }
+
+    if (@listed) {
+        # One user message carrying the file dump: the LLM sees the
+        # sources from the next request on, until they are pruned.
+        push @messages, { role => 'user', content => $dump };
+        print_block($CYAN . 'Added to the context:' . $RESET . "\n"
+            . join('', map { "  $_\n" } @listed));
+    }
+    else {
+        print_block($YELLOW . 'No files matched: ' . $patterns . $RESET
+            . "\n");
+    }
+    print "\n";
+    $after_blank = 1;
+}
+
+## Every regular file under $dir, recursively, as a path relative to  ##
+## the current directory; version-control bookkeeping (.git) and      ##
+## symlinks are skipped so a plain "*" stays a sane codebase.         ##
+sub list_files {
+    my ($dir) = @_;
+    my @found;
+
+    opendir my $dh, $dir or return ();
+    for my $entry (sort readdir $dh) {
+        next if $entry eq '.' || $entry eq '..' || $entry eq '.git';
+        my $path = "$dir/$entry";
+        $path =~ s{\A\./}{};    # keep the reported paths tidy
+        next if -l $path;
+        if (-d $path) {
+            push @found, list_files($path);
+        }
+        elsif (-f $path) {
+            push @found, $path;
+        }
+    }
+    closedir $dh;
+    return @found;
+}
+
+## Turn one shell-like wildcard into an anchored regex: * -> .*,     ##
+## ? -> ., every other character quoted so it matches only itself.    ##
+sub pattern_to_regex {
+    my ($pat) = @_;
+    my $re = '';
+    for my $ch (split //, $pat) {
+        $re .= $ch eq '*' ? '.*'
+             : $ch eq '?' ?  '.'
+             :              quotemeta($ch);
+    }
+    return qr/\A$re\z/;
+}
+
+## Slurp a file whole, byte for byte; undef when it cannot be read.   ##
+## NUL bytes are left in place and only stripped later, when the       ##
+## context is embedded into the jq/curl request (see san).            ##
+sub slurp {
+    my ($path) = @_;
+    open my $fh, '<:raw', $path or return undef;
+    local $/;
+    my $content = <$fh>;
+    close $fh;
+    return defined $content ? $content : '';
 }
 
 ## Print one block of output, preceded by a single blank line so      ##

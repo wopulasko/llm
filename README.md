@@ -18,7 +18,7 @@ prompt tools and three human-in-the-loop shell agents.
 | `llm.pl`  | Perl  | Rewrite of `llm.sh`: multi-line/piped input, UTF-8, real error handling. |
 | `agent.sh`   | shell | One-shot agent: run a task given on the command line, one confirmed command at a time. |
 | `agenti.sh`  | shell | Interactive agent REPL; each task is handled independently (no memory between tasks). |
-| `agenti.pl`  | Perl  | Interactive agent REPL with full conversation context (`--no-context` to disable), colours and `--help`. |
+| `agenti.pl`  | Perl  | Interactive agent REPL with full conversation context (`--no-context` to disable), `/codebase` and `/prune` context commands, colours and `--help`. |
 
 The shell agents (`agent.sh`, `agenti.sh`) ask the LLM for exactly one
 of `COMMAND: <shell command>` or `DONE: <explanation>`, and nothing runs
@@ -27,6 +27,12 @@ third reply type, `RESPONSE: <text>`: it decides on its own whether a
 message needs a shell command or is just conversation, so ordinary chat
 is answered with plain text and never triggers an unprovoked Bash
 invocation.
+
+`agenti.pl` also recognises two local commands at its prompt:
+`/codebase [pattern ...]` reads the files matching shell-like wildcards
+(`*py *md*`, or just `*`; matched recursively below the current
+directory) into the conversation context, and `/prune` strips the
+context back to the agent's system prompt, as in a fresh conversation.
 
 Binary output is tolerated: `agenti.pl` strips NUL bytes from the
 conversation before they are embedded in the `jq`/`curl` request, so
