@@ -2,9 +2,14 @@
 
 ## Interactive shell agent: it holds the context of the conversation. ##
 ## Pass --no-context to work without any previous context (amnesiac). ##
+## Persistent memory (~/.agent_memory/index.md + skills/skills.md) is  ##
+## loaded at the very start and actively managed: saved, pruned and   ##
+## word-capped (3000 / 1000) by the agent itself.                      ##
 
 use strict;
 use warnings;
+
+use File::Path qw(make_path);    # ~/.agent_memory/ is created on demand
 
 # Subdued, conventional ANSI colours:
 #   green   - user query
@@ -41,7 +46,8 @@ before.
 
 Options:
       --no-context   Hold no previous context: every task is handled
-                     independently, as if it were the first one.
+                     independently, as if it were the first one (the
+                     persistent memory files are still loaded).
   -h, --help         Display this help and exit.
 
 Commands (typed at the agent> prompt, handled locally):
@@ -56,6 +62,17 @@ Commands (typed at the agent> prompt, handled locally):
   /prune                   Forget the conversation so far and
                            return to the agent's system prompt, as
                            if the conversation were starting fresh.
+
+Persistent memory:
+  The agent keeps its memory in ~/.agent_memory/index.md (never more
+  than 3000 words) and its skills in ~/.agent_memory/skills/skills.md
+  (never more than 1000 words).  Both are plain Markdown so they can
+  be inspected manually, both are loaded into the context of the
+  conversation at the very start of every run, and both are actively
+  managed by the agent itself: it automatically decides when to save
+  a new memory or skill and when to prune an old one, keeping the
+  files within their word limits.  They are loaded even with
+  --no-context: persistent memory is not conversation context.
 
 Environment:
   API_BASE  Base URL of the chat-completions API.
@@ -84,9 +101,29 @@ print $CYAN . 'Interactive shell agent. Type a task, or "exit" to quit.'
     . $RESET . "\n";
 
 # The conversation so far, oldest first: every prompt shown to the LLM
-# and every answer it gave.  With --no-context this list stays empty, so
-# each request carries nothing but the current task (the old behaviour).
+# and every answer it gave.  Its very first message is the persistent
+# memory (loaded below at the very start of the program).  With
+# --no-context nothing else is kept, so each request carries the
+# memory and the current task (the old behaviour had only the task).
 my @messages;
+
+## Persistent memory: plain-Markdown files below ~/.agent_memory/,     ##
+## always loaded into the context at the very start of the program.    ##
+## index.md never exceeds 3000 words, skills.md never exceeds 1000:    ##
+## the caps are re-enforced on load and after every executed command,  ##
+## while the agent itself decides what to save and what to prune.      ##
+my $MEMORY_DIR =
+      defined $ENV{HOME} && length $ENV{HOME}
+    ? "$ENV{HOME}/.agent_memory"
+    : '';
+my $INDEX_FILE   = "$MEMORY_DIR/index.md";
+my $SKILLS_FILE  = "$MEMORY_DIR/skills/skills.md";
+my $INDEX_LIMIT  = 3000;
+my $SKILLS_LIMIT = 1000;
+my $MEM_MARKER   = 'Persistent memory';    # how the context message starts
+my $mem_slot;    # position of that message inside @messages
+
+memory_load();
 
 while (1) {
     print $GREEN . 'agent> ' . $RESET;
@@ -121,6 +158,9 @@ while (1) {
         # request starts from the agent's system prompt alone, just
         # as if this were the first message ever asked.
         @messages = ();
+        # A fresh conversation starts the way this program started:
+        # with the persistent memory loaded into the context.
+        memory_load();
         print_block($CYAN . 'Context pruned: back to the system prompt,'
             . ' as in a fresh conversation.' . $RESET . "\n");
         print "\n";
@@ -139,6 +179,18 @@ $task
 
 Previous execution:
 $history
+
+Persistent memory:
+Your persistent memory lives in ~/.agent_memory/index.md (at most
+3000 words) and ~/.agent_memory/skills/skills.md (at most 1000
+words), both loaded as plain Markdown at the start of this
+conversation.  You manage them yourself: whenever a task produces
+something worth remembering (a fact, a preference, an outcome, a
+lesson), save it into index.md and prune what went stale; when a
+task yields a reusable skill, put the script in
+~/.agent_memory/skills/ and describe it in skills.md.  Rewrite the
+files with a shell command when needed and never let either file
+exceed its word limit.
 
 Return EXACTLY ONE of:
 COMMAND: <one shell command>
@@ -183,6 +235,8 @@ PROMPT
 
             if ($answer eq 'y' || $answer eq 'Y') {
                 my ($output, $status) = run_command($cmd);
+                memory_sync();    # the command may have just rewritten
+                                   # the memory files: cap + refresh now
 
                 print_block($CYAN . $output . $RESET . "\n")
                     if length $output;
@@ -224,6 +278,11 @@ PROMPT
             last;
         }
     }
+
+    # The turn is over: re-enforce the memory word caps (its last
+    # command may have rewritten the files) and refresh the memory
+    # message in the context so the next task sees it as it stands.
+    memory_sync();
 }
 
 ## Read the files matching the /codebase patterns into the context  ##
@@ -419,4 +478,176 @@ sub san {
     return '' unless defined $str;
     $str =~ s/\0//g;
     return $str;
+}
+
+
+## ---- Persistent memory: ~/.agent_memory ------------------------------ ##
+
+## Number of whitespace-separated words in a text; the very same      ##
+## notion of "word" that keeps index.md <= 3000 and skills.md <= 1000 ##
+sub count_words {
+    my ($text) = @_;
+    return 0 unless defined $text;
+    return scalar(() = $text =~ /\S+/g);
+}
+
+## Hard-cap a text at $limit words: when it already fits, it is        ##
+## returned untouched; otherwise everything past the limit is cut off  ##
+## at a word boundary (the original line breaks of the kept part are   ##
+## preserved) and a short prune note is appended, itself counted       ##
+## towards the limit so the result can never exceed it.                ##
+sub cap_text {
+    my ($text, $limit) = @_;
+    return $text if count_words($text) <= $limit;
+
+    my @parts = ($text =~ /(\S+\s*)/g);
+    my $note  = "\n\n*(pruned to keep this file at most $limit words)*";
+    my $keep  = $limit - count_words($note);
+    if ($keep <= 0) {    # pathological limit: the plain cap wins
+        my $out = join '', @parts[0 .. $limit - 1];
+        $out =~ s/\s+\z//;
+        return $out;
+    }
+    my $out = join '', @parts[0 .. $keep - 1];
+    $out =~ s/\s+\z//;
+    return $out . "\n" . $note;
+}
+
+## Read one memory file: seed it when it does not exist yet, enforce  ##
+## its word cap (writing the file back when the cap trimmed it), and   ##
+## return the text that is fit for the conversation context.           ##
+sub read_or_seed {
+    my ($path, $seed, $limit) = @_;
+    my $text = slurp($path);
+    if (!defined $text) {    # missing or unreadable: (re)create it
+        my $capped = cap_text($seed, $limit);
+        write_file($path, $capped);
+        return $capped;
+    }
+    my $capped = cap_text($text, $limit);
+    write_file($path, $capped) if $capped ne $text;
+    return $capped;
+}
+
+## Write one plain-Markdown memory file, creating its folder on demand ##
+sub write_file {
+    my ($path, $text) = @_;
+    if ($path =~ m{\A(.+)/[^/]+\z}) {
+        my $dir = $1;
+        if (length $dir && !-d $dir) {
+            eval { make_path($dir); 1 }
+                or do {
+                    warn "agenti.pl: cannot create directory $dir: $!\n";
+                    return;
+                };
+        }
+    }
+    open my $fh, '>:raw', $path
+        or do {
+            warn "agenti.pl: cannot write $path: $!\n";
+            return;
+        };
+    print {$fh} $text;
+    close $fh;
+}
+
+## Both memory files as they stand right now, word-capped             ##
+sub memory_read_all {
+    # Seeds: index.md must mention where the skills live; skills.md
+    # must describe what a skill is.  Both are plain Markdown.
+    my $index_seed = <<'INDEX_MD';
+# Persistent memory
+
+This file is `~/.agent_memory/index.md`, the shell agent's persistent
+memory.  It is plain Markdown so it can be inspected manually, it is
+always loaded into the context of the conversation at the very start
+of the program, and the shell agent actively manages it itself: the
+agent automatically decides when to save a new memory here and when
+to prune an old one, so this file never exceeds 3000 words.
+
+## Skills
+
+Skills will be stored in the `~/.agent_memory/skills/` folder, with
+`skills.md` (i.e. `~/.agent_memory/skills/skills.md`) containing a
+description of each skill script or program - typically written in
+Perl, Bash or Python; but it may also be just another MD file with
+instructions or even knowledge data.  `skills.md` is loaded to the
+context of the conversation at the start as well, hard capped at
+1000 words, and it is managed by the shell agent too, which writes
+down new skills and their descriptions so it can decide when to
+invoke a particular skill - a very common task.
+
+## Memories
+
+- (no memories saved yet)
+INDEX_MD
+
+    my $skills_seed = <<'SKILLS_MD';
+# Skills
+
+This file is `~/.agent_memory/skills/skills.md`, the index of the
+shell agent's skills.  It is plain Markdown, loaded to the context
+of the conversation at the start of the program (hard capped at
+1000 words) and actively managed by the shell agent: new skills and
+their descriptions are written down here and stale ones are pruned,
+so the agent can decide when to invoke a particular skill.
+
+A skill is a script or program - typically written in Perl, Bash or
+Python - kept in the `~/.agent_memory/skills/` folder; it may also
+be just another MD file with instructions or even knowledge data.
+Each entry below names the file and says when it is worth using.
+
+## Registered skills
+
+- (no skills registered yet)
+SKILLS_MD
+
+    my $index  = read_or_seed($INDEX_FILE,  $index_seed,  $INDEX_LIMIT);
+    my $skills = read_or_seed($SKILLS_FILE, $skills_seed, $SKILLS_LIMIT);
+    return ($index, $skills);
+}
+
+## The memory files packed into one message for the conversation       ##
+sub memory_context_message {
+    my ($index, $skills) = @_;
+    return $MEM_MARKER . ' of the shell agent, loaded at the very start'
+        . ' of this conversation as plain Markdown.  You manage it'
+        . ' yourself: save new memories and skills, prune old ones, and'
+        . ' keep index.md within ' . $INDEX_LIMIT . ' words and'
+        . ' skills.md within ' . $SKILLS_LIMIT . ' words.'
+        . "\n\n=== ~/.agent_memory/index.md ("
+        . count_words($index) . " words) ===\n" . $index
+        . "\n\n=== ~/.agent_memory/skills/skills.md ("
+        . count_words($skills) . " words) ===\n" . $skills . "\n";
+}
+
+## Load the persistent memory into the context.  Called at the very    ##
+## start of the program and again after /prune, because a fresh       ##
+## conversation starts the same way this program does.  Without $HOME  ##
+## there is nowhere to keep the files and the feature stays off.       ##
+sub memory_load {
+    return unless length $MEMORY_DIR;
+    my ($index, $skills) = memory_read_all();
+    push @messages,
+        { role => 'user', content => memory_context_message($index, $skills) };
+    $mem_slot = $#messages;
+}
+
+## Re-enforce the word caps after a turn (the agent may have just      ##
+## rewritten the files) and refresh the context message in place, so   ##
+## the next task sees the memory as it stands now.                     ##
+sub memory_sync {
+    return unless length $MEMORY_DIR;
+    my ($index, $skills) = memory_read_all();
+    my $msg = memory_context_message($index, $skills);
+    if (defined $mem_slot && $mem_slot <= $#messages
+        && index($messages[$mem_slot]{content}, $MEM_MARKER) == 0)
+    {
+        $messages[$mem_slot]{content} = $msg
+            unless $messages[$mem_slot]{content} eq $msg;
+    }
+    else {    # the context was reset behind our back: load it again
+        push @messages, { role => 'user', content => $msg };
+        $mem_slot = $#messages;
+    }
 }
