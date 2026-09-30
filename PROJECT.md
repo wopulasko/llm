@@ -32,7 +32,8 @@ External tools required:
 * **Shell scripts**: a POSIX `sh`, plus `curl` and `jq`.
 * **Perl scripts**: Perl 5 with `JSON::PP` (in `llm.pl`; part of the Perl
   core distribution). The other Perl script shells out to `curl`/`jq` as
-  well (`agenti.pl`).
+  well (`agenti.pl`) and uses only core modules (`Cwd`, `File::Path`,
+  `POSIX`); its persistent memory lives in `~/.agent_memory`.
 
 ## The scripts in detail
 
@@ -119,17 +120,42 @@ The same agent loop as `agent.sh`, wrapped in a REPL:
 Otherwise identical protocol, API call and confirmation flow to
 `agent.sh`.
 
-### 5. `agenti.pl` — interactive shell agent with context (Perl)
+### 5. `agenti.pl` — interactive shell agent with context and persistent memory (Perl)
 
 The most elaborate script: a Perl rewrite of the interactive agent that
-adds real conversation memory and polish.
+adds real conversation memory, a persistent Markdown knowledge base
+and polish.
 
 * **Conversation context (default)**: every prompt sent to the LLM and
   every answer received is kept in `@messages` and replayed with each
   new request, so later tasks can build on everything asked, executed
   and answered before. With `--no-context` the list stays empty and each
   request carries only the current task (the amnesiac/old behaviour).
-* **Slash commands**: two inputs at the `agent>` prompt are handled
+* **Persistent memory (`~/.agent_memory`)**: the canonical knowledge
+  base, a directory of plain Markdown files created on first run.  It
+  is meant to be inspected and edited by hand; the agent only ever
+  adds to it, so new information never destroys old context:
+  * `index.md` — the lightweight index: every page and folder listed
+    with a brief description as a relative Markdown link, which turns
+    the store into a navigable knowledge graph.  New pages and folders
+    are added to it automatically; existing entries (hand-written
+    included) are never modified, and entries dropped by hand are
+    re-listed on startup.
+  * `session_log.md` — the running log of notable events and decisions
+    appended by every session: session start/end, each task with its
+    outcome and how many shell commands ran, executed commands, memory
+    saves, prunes and `/log` entries.  Appended only, never rewritten.
+  * Knowledge pages — notes accumulate under `## YYYY-MM-DD` headings,
+    so days add up instead of replacing each other; a new page gets a
+    title and an index entry automatically.  `index.md` and
+    `session_log.md` are protected from note writes, and page names
+    that could escape the directory are rejected.
+  * On startup (unless `--no-context`) a snapshot — the index in full
+    plus the tail of the session log — is pushed as the first
+    conversation message, so knowledge recorded in previous sessions
+    is available from the very first request; `/prune` restores the
+    snapshot along with the system prompt.
+* **Slash commands**: six inputs at the `agent>` prompt are handled
   locally and never sent to the LLM as a task of their own:
 
   ```
@@ -139,29 +165,44 @@ adds real conversation memory and polish.
                            recursively among the files below the
                            current directory; several patterns may be
                            combined ("*py *md*"), the default is "*".
+  /memory [pattern ...]    Read matching pages of the persistent
+                           memory (~/.agent_memory) into the
+                           conversation context; same pattern rules
+                           as /codebase, the default "*" reads every
+                           page.
+  /index                   Show the memory index (index.md).
+  /remember [page.md] text Append text as a dated note to the given
+                           memory page (notes.md when no page is
+                           given); new pages and their index entries
+                           are created as needed.
+  /log text                Append an entry to session_log.md.
   /prune                   Forget the conversation so far and return
                            to the agent's system prompt, as if the
-                           conversation were starting fresh.
+                           conversation were starting fresh.  The
+                           persistent memory is left untouched.
   ```
 
-  `/codebase` appends one user message holding a `=== path ===` dump
-  of every match (deduplicated across patterns; `.git` bookkeeping
-  and symlinks are skipped, plain paths without wildcards are read as
-  given) and reports the files it added on screen; a pattern that
-  matches nothing only prints a warning.  `/prune` empties
-  `@messages`, so the next request carries the system prompt and the
-  new task alone.  Both commands work under `--no-context` too: an
-  explicit `/codebase` load is kept until it is pruned, while the
-  ordinary turns stay context-free as usual.
+  `/codebase` and `/memory` append one user message holding a
+  `=== path ===` dump of every match (deduplicated across patterns;
+  `.git` bookkeeping and symlinks are skipped, plain paths without
+  wildcards are read as given) and report the files they added on
+  screen; a pattern that matches nothing only prints a warning.
+  `/remember` refuses `index.md` (maintained by the agent itself)
+  and `session_log.md` (write it with `/log`).  `/prune` empties
+  `@messages`, so the next request carries the system prompt, the
+  memory snapshot and the new task.  The context commands work under
+  `--no-context` too: an explicit load is kept until it is pruned,
+  while the ordinary turns stay context-free as usual.
 * **Command line**: `--no-context` and `-h/--help` (usage text describing
   options, environment and exit status); unknown options exit with
   status 2.
-* **Three-way reply protocol**: unlike the shell agents, the prompt
+* **Four-way reply protocol**: unlike the shell agents, the prompt
   offers the LLM one of
 
   ```
   COMMAND: <one shell command>
   RESPONSE: <plain-text reply to the user>
+  MEMORY: <knowledge worth persisting>
   DONE: <short explanation>
   ```
 
@@ -170,8 +211,13 @@ adds real conversation memory and polish.
   execution history (`$history`) still feeds the next prompt.
   `RESPONSE:` is printed as a conversational answer with no shell
   involvement, so ordinary chatting never triggers a Bash invocation.
-  `DONE:` reports a completed task.  Anything else is printed as
-  `Unexpected LLM response` on stderr.
+  `MEMORY:` appends its note to a memory page (`MEMORY: [page.md] …`
+  chooses the page, `notes.md` by default), reports where it was
+  stored and loops so the LLM can follow up with `DONE:`.  `DONE:`
+  reports a completed task.  Anything else is printed as
+  `Unexpected LLM response` on stderr.  Whatever the outcome, one
+  timestamped line summarising the task is appended to
+  `session_log.md`.
 * **Colours**: subdued ANSI colours distinguish the parts of the output —
   green (user query/prompt), yellow (command + confirmation), cyan
   (program output), magenta (LLM answer).
@@ -184,7 +230,11 @@ adds real conversation memory and polish.
   safe), the API is called through a `curl | jq` pipeline via `qx{}`, and
   shell arguments are single-quote escaped by `sh_quote`. Command exit
   statuses are computed the way `sh` reports them (exit code, or
-  `128+signal` when killed by a signal, `127` if exec failed).
+  `128+signal` when killed by a signal, `127` if exec failed).  Memory
+  files are written through append-only `>>` handles (starting from a
+  fresh line when needed); the only rewrite is the insertion of a
+  single new index bullet, done atomically through a temporary file
+  and `rename`.
 * **NUL handling**: NUL bytes are stripped (`san`) from the current
   prompt and from every replayed message before they join the
   `jq -n --arg …` command line. `execve()` arguments are
@@ -215,6 +265,9 @@ perl agenti.pl --no-context  # same, but forgets previous tasks
 
 * No shared code — the two agent shell scripts and the Perl agent each
   contain their own copy of the prompt template and API-call logic.
+* The persistent memory of `agenti.pl` lives outside the repository, in
+  `~/.agent_memory` (plain Markdown: `index.md`, `session_log.md` and
+  knowledge pages).
 * No tests, no CI, no dependency pinning; the model name is hard-coded
   in all five scripts.
 * History/evolution visible in the scripts: `llm.sh` → `llm.pl`,
