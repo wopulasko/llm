@@ -18,7 +18,7 @@ prompt tools and three human-in-the-loop shell agents.
 | `llm.pl`  | Perl  | Rewrite of `llm.sh`: multi-line/piped input, UTF-8, real error handling. |
 | `agent.sh`   | shell | One-shot agent: run a task given on the command line, one confirmed command at a time. |
 | `agenti.sh`  | shell | Interactive agent REPL; each task is handled independently (no memory between tasks). |
-| `agenti.pl`  | Perl  | Interactive agent REPL with full conversation context (`--no-context` to disable), persistent Markdown memory in `~/.agent_memory`, `/codebase`, `/memory`, `/index`, `/remember`, `/log` and `/prune` commands, colours and `--help`. |
+| `agenti.pl`  | Perl  | Interactive agent REPL with full conversation context (`--no-context` to disable), `/codebase` and `/prune` context commands, colours and `--help`. |
 
 The shell agents (`agent.sh`, `agenti.sh`) ask the LLM for exactly one
 of `COMMAND: <shell command>` or `DONE: <explanation>`, and nothing runs
@@ -26,31 +26,13 @@ until you answer `y` to the `Execute? [y/N]` prompt.  `agenti.pl` adds a
 third reply type, `RESPONSE: <text>`: it decides on its own whether a
 message needs a shell command or is just conversation, so ordinary chat
 is answered with plain text and never triggers an unprovoked Bash
-invocation.  A fourth reply type, `MEMORY: [page.md] <note>`, persists
-knowledge: it appends a short note to a page of the persistent memory
-without touching anything already stored.
+invocation.
 
-`agenti.pl` also recognises local commands at its prompt:
+`agenti.pl` also recognises two local commands at its prompt:
 `/codebase [pattern ...]` reads the files matching shell-like wildcards
 (`*py *md*`, or just `*`; matched recursively below the current
 directory) into the conversation context, and `/prune` strips the
-context back to the agent's system prompt, as in a fresh conversation
-(the persistent memory is kept).
-
-Its memory commands work on `~/.agent_memory`, the canonical knowledge
-base: `/memory [pattern ...]` reads matching memory pages into the
-conversation, `/index` shows the index, `/remember [page.md] text`
-appends a dated note to a page (creating the page and its index entry
-when new) and `/log text` appends an entry to the session log.
-
-The persistent memory is plain Markdown, inspected and edited by hand;
-the agent only ever adds to it.  `index.md` is a lightweight index
-listing every page and folder with a brief description via relative
-Markdown links (a navigable knowledge graph), and `session_log.md` is
-the running log of notable events and decisions appended by every
-session.  A snapshot of the index and the recent log is loaded at
-startup (skipped with `--no-context`), so knowledge recorded in one
-session is available in the next one.
+context back to the agent's system prompt, as in a fresh conversation.
 
 Binary output is tolerated: `agenti.pl` strips NUL bytes from the
 conversation before they are embedded in the `jq`/`curl` request, so
